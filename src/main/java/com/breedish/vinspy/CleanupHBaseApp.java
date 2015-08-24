@@ -84,6 +84,8 @@ public class CleanupHBaseApp implements CommandLineRunner {
         final AtomicInteger progress = new AtomicInteger(0);
         final CountDownLatch counter = new CountDownLatch(total);
 
+        log.info("Total to process: {}", total);
+
         for (int i = 0; i < queueSize; i++) {
             executorService.submit(new Runnable() {
                 @Override
@@ -91,14 +93,12 @@ public class CleanupHBaseApp implements CommandLineRunner {
                     while (!Thread.currentThread().isInterrupted()) {
                         try {
                             Pair<DBObject, TableName> take = jobQueue.take();
-
+                            progress.incrementAndGet();
+                            if (progress.get() % 10 == 0) {
+                                log.info("{}/{} Processed", progress.get(), total);
+                            }
                             if (take.getValue0() != null) {
                                 DBObject job = take.getValue0();
-                                progress.incrementAndGet();
-                                if (progress.get() % 10 == 0) {
-                                    log.info("{}/{} Processed", progress.get(), total);
-                                }
-
                                 DBObject status = (DBObject) job.get("jobStatus");
                                 final String crawlId = (String) status.get("crawlId");
                                 Object id = job.get("_id");
@@ -112,12 +112,7 @@ public class CleanupHBaseApp implements CommandLineRunner {
 
                                 final String tableName = crawlId + "_webpage";
 
-                                if (hBaseAdmin.tableExists(tableName)) {
-                                    if (hBaseAdmin.isTableEnabled(tableName)) {
-                                        hBaseAdmin.disableTable(tableName);
-                                    }
-                                    hBaseAdmin.deleteTable(tableName);
-                                }
+                                deleteTable(tableName, hBaseAdmin);
 
                                 jobCollection.update(
                                     BasicDBObjectBuilder.start("_id", id).get(),
@@ -126,12 +121,14 @@ public class CleanupHBaseApp implements CommandLineRunner {
                             } else if (take.getValue1() != null) {
                                 TableName tableName = take.getValue1();
                                 String timeStamp = tableName.getNameAsString().split("-")[0];
-                                Duration duration = new Duration(DateTime.parse(timeStamp), DateTime.now());
-                                if (duration.toPeriod(PeriodType.hours()).getHours() > ttl) {
-                                    if (hBaseAdmin.isTableEnabled(tableName)) {
-                                        hBaseAdmin.disableTable(tableName);
+                                try {
+                                    Duration duration = new Duration(new DateTime(Long.parseLong(timeStamp)), DateTime.now());
+                                    if (duration.toPeriod(PeriodType.hours()).getHours() > ttl) {
+                                        deleteTable(tableName.getNameAsString(), hBaseAdmin);
                                     }
-                                    hBaseAdmin.deleteTable(tableName);
+                                } catch (IllegalArgumentException e) {
+                                    log.error("Issue during trash cleanup", e);
+                                    deleteTable(tableName.getNameAsString(), hBaseAdmin);
                                 }
                             }
                         } catch (InterruptedException e) {
@@ -162,5 +159,15 @@ public class CleanupHBaseApp implements CommandLineRunner {
         cursor.close();
         log.info("Finished in {} seconds", stopWatch.getTotalTimeSeconds());
     }
+
+    private void deleteTable(String tableName, HBaseAdmin hBaseAdmin) throws Exception {
+        if (hBaseAdmin.tableExists(tableName)) {
+            if (hBaseAdmin.isTableEnabled(tableName)) {
+                hBaseAdmin.disableTable(tableName);
+            }
+            hBaseAdmin.deleteTable(tableName);
+        }
+    }
+
 
 }
